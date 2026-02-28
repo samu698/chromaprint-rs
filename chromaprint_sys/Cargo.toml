@@ -1,0 +1,23 @@
+[package]
+name = "chromaprint_sys"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+
+[build-dependencies]
+cmake = "0.1.57"
+ctest = "0.5.0"
+pkg-config = "0.3.32"
+vcpkg = "0.2.15"
+
+[features]
+static = []
+dynamic = []
+system = []
+vendored = []
+
+[[test]]
+name = "ctest"
+harness = false
