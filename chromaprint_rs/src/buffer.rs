@@ -5,6 +5,8 @@ use chromaprint_sys as sys;
 #[repr(transparent)]
 pub(crate) struct AllocSlot<T>(*mut T);
 
+use crate::{Result, ChromaprintError};
+
 impl<T> AllocSlot<T> {
     pub(crate) fn new() -> Self {
         Self(std::ptr::null_mut())
@@ -17,12 +19,14 @@ impl<T> AllocSlot<T> {
 }
 
 impl<T: Copy> AllocSlot<T> {
-    pub(crate) unsafe fn into_box(self, len: usize) -> Option<Box<[T]>> {
+    pub(crate) unsafe fn into_box(self, len: usize) -> Result<Box<[T]>> {
         let ptr = self.0;
-        if ptr.is_null() { return None; }
+        if ptr.is_null() {
+            return Err(ChromaprintError::InvalidBuffer);
+        }
         unsafe {
             let slice = slice::from_raw_parts(ptr, len);
-            Some(slice.into())
+            Ok(slice.into())
         }
     }
 }
