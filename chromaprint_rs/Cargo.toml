@@ -1,0 +1,8 @@
+[package]
+name = "chromaprint_rs"
+version = "1.0.0"
+edition.workspace = true
+authors.workspace = true
+
+[dependencies]
+chromaprint_sys = { version = "1.0.0", path = "../chromaprint_sys" }

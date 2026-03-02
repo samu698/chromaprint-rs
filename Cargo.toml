@@ -1,5 +1,5 @@
 [workspace]
-members = [ "chromaprint_sys" ]
+members = [ "chromaprint_rs", "chromaprint_sys" ]
 resolver = "3"
 
 [workspace.package]

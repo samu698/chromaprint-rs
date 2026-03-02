@@ -1,0 +1,328 @@
+use std::ffi::{CStr, c_int};
+use std::fmt::Display;
+use std::ptr::NonNull;
+
+mod buffer;
+
+use chromaprint_sys as sys;
+
+use crate::buffer::AllocSlot;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Algorithm {
+    Test1,
+    #[default]
+    Test2,
+    Test3,
+    Test4,
+    Test5,
+}
+
+impl Algorithm {
+    fn into_sys(self) -> sys::ChromaprintAlgorithm {
+        use sys::ChromaprintAlgorithm as A;
+        match self {
+            Self::Test1 => A::TEST1,
+            Self::Test2 => A::TEST2,
+            Self::Test3 => A::TEST3,
+            Self::Test4 => A::TEST4,
+            Self::Test5 => A::TEST5,
+        }
+    }
+
+    fn from_sys(algo: sys::ChromaprintAlgorithm) -> Self {
+        use sys::ChromaprintAlgorithm as A;
+        if algo == A::TEST1 { return Self::Test1; }
+        if algo == A::TEST2 { return Self::Test2; }
+        if algo == A::TEST3 { return Self::Test3; }
+        if algo == A::TEST4 { return Self::Test4; }
+        if algo == A::TEST5 { return Self::Test5; }
+        panic!("FIXME: Return an error in this case")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fingerprint {
+    algorithm: Algorithm,
+    data: Box<[u32]>,
+}
+
+impl Fingerprint {
+    pub fn decode_binary(fingerprint: &[u8]) -> Result<Self> {
+        Self::decode(fingerprint, false)
+    }
+
+    pub fn decode_base64(fingerprint: &str) -> Result<Self> {
+        Self::decode(fingerprint.as_bytes(), true)
+    }
+
+    #[inline]
+    pub fn as_raw(&self) -> &[u32] {
+        &self.data
+    }
+
+    #[inline]
+    pub fn into_raw(self) -> Box<[u32]> {
+        self.data
+    }
+
+    #[inline]
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    pub fn hash(&self) -> Result<u32> {
+        let mut hash = 0;
+
+        let ret = unsafe {
+            sys::chromaprint_hash_fingerprint(
+                self.data.as_ptr(),
+                self.data.len() as c_int,
+                &mut hash
+            )
+        };
+
+        check_ret(ret)?;
+        Ok(hash)
+    }
+
+    pub fn encode_base64(&self) -> Result<Box<str>> {
+        let data = self.encode(true)?;
+        let str = String::from_utf8(data.into_vec()).expect("TODO");
+        Ok(str.into_boxed_str())
+    }
+
+    pub fn encode_binary(&self) -> Result<Box<[u8]>> {
+        self.encode(false)
+    }
+
+    fn decode(fingerprint: &[u8], base64: bool) -> Result<Self> {
+        let mut decoded = AllocSlot::new();
+        let mut size = 0;
+        let mut algorithm = sys::ChromaprintAlgorithm::default();
+
+        let ret = unsafe {
+            sys::chromaprint_decode_fingerprint(
+                fingerprint.as_ptr().cast(), 
+                fingerprint.len() as c_int, 
+                decoded.as_ptr(), 
+                &mut size,
+                &mut algorithm,
+                if base64 { 1 } else { 0 }
+            )
+        };
+
+        check_ret(ret)?;
+
+        let data = unsafe {
+            decoded.into_box(size as usize)
+                .ok_or(ChromaprintError)?
+        };
+        let algorithm = Algorithm::from_sys(algorithm);
+        Ok(Self {
+            data,
+            algorithm
+        })
+    }
+
+    fn encode(&self, base64: bool) -> Result<Box<[u8]>> {
+        let mut encoded = AllocSlot::new();
+        let mut size = 0;
+
+        let ret = unsafe {
+            sys::chromaprint_encode_fingerprint(
+                self.data.as_ptr(), 
+                self.data.len() as c_int, 
+                self.algorithm.into_sys(), 
+                encoded.as_ptr(), 
+                &mut size, 
+                if base64 { 1 } else { 0 }
+            )
+        };
+
+        check_ret(ret)?;
+
+        unsafe {
+            // FIXME: check valid size
+            let data = encoded.into_box(size as usize)
+                .ok_or(ChromaprintError)?;
+            let data = Box::into_raw(data);
+            Ok(Box::from_raw(data as *mut _))
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ChromaprintError;
+
+impl Display for ChromaprintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("ChromaprintError").finish()
+    }
+}
+
+impl std::error::Error for ChromaprintError {}
+
+type Result<T> = std::result::Result<T, ChromaprintError>;
+
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum ChromaprintOption {
+    SilenceThreshold(i16),
+}
+
+impl ChromaprintOption {
+    const fn name(&self) -> &'static CStr {
+        match self {
+            Self::SilenceThreshold(_) => unsafe {
+                CStr::from_bytes_with_nul_unchecked(b"silence_threshold\0")
+            }
+        }
+    }
+}
+
+pub struct Context(NonNull<sys::ChromaprintContext>);
+
+impl Context {
+    fn ctx(&self) -> *mut sys::ChromaprintContext {
+        self.0.as_ptr()
+    }
+
+    pub fn new(algorithm: Algorithm) -> Option<Self> {
+        let algorithm = algorithm.into_sys();
+        unsafe {
+            let new = sys::chromaprint_new(algorithm);
+            NonNull::new(new).map(Self)
+        }
+    }
+
+    pub fn start(&mut self, sample_rate: u32, channels: u32) -> Result<()> {
+        // TODO: avoid overflow of sample rate
+        let sample_rate = sample_rate as c_int;
+        // TODO: supported number of channels is 1 on 2
+        let channels = channels as c_int;
+        let ret = unsafe {
+            sys::chromaprint_start(self.ctx(), sample_rate, channels)
+        };
+        check_ret(ret)
+    }
+
+    pub fn feed(&mut self, data: &[i16]) -> Result<()> {
+        // TODO: check that size fits in a c_int
+        let size = data.len() as c_int;
+        let ret = unsafe {
+            sys::chromaprint_feed(self.ctx(), data.as_ptr(), size)
+        };
+        check_ret(ret)
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        let ret = unsafe {
+            sys::chromaprint_finish(self.ctx())
+        };
+        check_ret(ret)
+    }
+
+    pub fn clear(&mut self) -> Result<()> {
+        let ret = unsafe {
+            sys::chromaprint_clear_fingerprint(self.ctx())
+        };
+        check_ret(ret)
+    }
+
+    pub fn get_fingerprint(&mut self) -> Result<Fingerprint> {
+        let mut fingerprint = AllocSlot::new();
+        let mut size = 0;
+        let ret = unsafe {
+            sys::chromaprint_get_raw_fingerprint(
+                self.ctx(),
+                fingerprint.as_ptr(),
+                &mut size
+            )
+        };
+
+        check_ret(ret)?;
+
+        // TODO: check that the size is valid
+        let data = unsafe { fingerprint.into_box(size as usize) }
+            .ok_or(ChromaprintError)?;
+
+        Ok(Fingerprint {
+            algorithm: self.get_alorithm(),
+            data,
+        })
+    }
+
+    pub fn set_option(&mut self, option: ChromaprintOption) -> Result<()> {
+        let name = option.name();
+        let value = match option {
+            // TODO: check that the value is positive
+            ChromaprintOption::SilenceThreshold(v) => v as i32,
+        };
+
+        let ret = unsafe {
+            sys::chromaprint_set_option(self.ctx(), name.as_ptr(), value)
+        };
+
+        check_ret(ret)
+    }
+
+    pub fn get_alorithm(&self) -> Algorithm {
+        let algorithm = unsafe { sys::chromaprint_get_algorithm(self.ctx()) };
+        Algorithm::from_sys(algorithm)
+    }
+
+    pub fn get_delay(&self) -> i32 {
+        let delay = unsafe { sys::chromaprint_get_delay(self.ctx()) };
+        delay as i32
+    }
+
+    pub fn get_delay_ms(&self) -> i32 {
+        let delay = unsafe { sys::chromaprint_get_delay_ms(self.ctx()) };
+        delay as i32
+    }
+
+    pub fn get_item_duration(&self) -> i32 {
+        let duration = unsafe { sys::chromaprint_get_item_duration(self.ctx()) };
+        duration as i32
+    }
+
+    pub fn get_item_duration_ms(&self) -> i32 {
+        let duration = unsafe { sys::chromaprint_get_item_duration_ms(self.ctx()) };
+        duration as i32
+    }
+
+    pub fn get_num_channels(&self) -> i32 {
+        let channels = unsafe { sys::chromaprint_get_num_channels(self.ctx()) };
+        channels as i32
+    }
+
+    pub fn get_sample_rate(&self) -> i32 {
+        let sr = unsafe { sys::chromaprint_get_sample_rate(self.ctx()) };
+        sr as i32
+    }
+}
+
+impl Drop for Context {
+    fn drop(&mut self) {
+        unsafe { sys::chromaprint_free(self.0.as_ptr()); }
+    }
+}
+
+pub fn get_version() -> &'static str {
+    unsafe {
+        let cstr = sys::chromaprint_get_version();
+        let cstr = CStr::from_ptr(cstr);
+        cstr.to_str().expect("Invalid Chromaprint version string")
+    }
+
+}
+
+#[inline]
+fn check_ret(r: std::ffi::c_int) -> Result<()> {
+    if r == 1 {
+        Ok(())
+    } else {
+        Err(ChromaprintError)
+    }
+}
